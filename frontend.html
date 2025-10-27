@@ -244,6 +244,54 @@
             margin-bottom: 10px;
         }
 
+        .visualization-info {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            text-align: center;
+        }
+
+        .viz-label {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+
+        .viz-description {
+            font-size: 0.9em;
+            opacity: 0.9;
+            line-height: 1.4;
+        }
+
+        .concern-details {
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-size: 0.85em;
+        }
+
+        .concern-details div {
+            margin: 3px 0;
+        }
+
+        .severity {
+            font-weight: bold;
+            color: #ff6b6b;
+        }
+
+        .locations {
+            color: #4facfe;
+        }
+
+        .overlay-info {
+            font-style: italic;
+            opacity: 0.8;
+            font-size: 0.8em;
+        }
+
         @media (max-width: 768px) {
             .container {
                 margin: 10px;
@@ -260,6 +308,10 @@
 
             .results-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .viz-description {
+                font-size: 0.8em;
             }
         }
     </style>
@@ -435,41 +487,82 @@
             clearError();
         });
 
-        // Display results
+        // Display results with advanced visualization
         function displayResults(data) {
-            const { scores, detected_concerns, threshold } = data;
+            const { scores, detected_concerns, threshold, visualization, detailed_analysis } = data;
 
-            // Update summary
+            // Update summary with localization info
             const detectedCount = detected_concerns.length;
             const totalConcerns = Object.keys(scores).length;
             
             if (detectedCount > 0) {
-                summaryText.textContent = `${detectedCount} out of ${totalConcerns} skin concerns detected above ${(threshold * 100)}% confidence threshold.`;
+                let summaryParts = [`${detectedCount} out of ${totalConcerns} skin concerns detected above ${(threshold * 100)}% confidence threshold.`];
+                
+                // Add localization summary if available
+                if (detailed_analysis) {
+                    const localizationSummary = Object.entries(detailed_analysis)
+                        .filter(([_, data]) => data.locations_count > 0)
+                        .map(([concern, data]) => {
+                            const concernName = concern.replace('_', ' ');
+                            return `${concernName}: ${data.locations_count} area${data.locations_count > 1 ? 's' : ''} (${data.severity})`;
+                        });
+                    
+                    if (localizationSummary.length > 0) {
+                        summaryParts.push(`Precise locations: ${localizationSummary.join(', ')}`);
+                    }
+                }
+                
+                summaryText.innerHTML = summaryParts.join('<br>');
             } else {
                 summaryText.textContent = `Great news! No significant skin concerns detected above ${(threshold * 100)}% confidence threshold.`;
+            }
+
+            // Display visualization if available
+            if (visualization) {
+                // Update the preview image with the overlaid visualization
+                previewImg.src = visualization;
+                
+                // Add visualization info
+                const vizInfo = document.createElement('div');
+                vizInfo.className = 'visualization-info';
+                vizInfo.innerHTML = `
+                    <div class="viz-label">📍 AI Analysis with Precise Localization</div>
+                    <div class="viz-description">
+                        Red circles = Acne spots | Blue areas = Dark circles | 
+                        Red areas = Redness | Colored lines = Wrinkles
+                    </div>
+                `;
+                
+                // Insert visualization info after preview image
+                const existingInfo = previewSection.querySelector('.visualization-info');
+                if (existingInfo) {
+                    existingInfo.remove();
+                }
+                previewSection.appendChild(vizInfo);
             }
 
             // Clear previous results
             resultsGrid.innerHTML = '';
 
-            // Create concern cards
+            // Create enhanced concern cards
             Object.entries(scores).forEach(([concern, score]) => {
                 const isDetected = detected_concerns.includes(concern);
-                const card = createConcernCard(concern, score, isDetected, threshold);
+                const detailedInfo = detailed_analysis ? detailed_analysis[concern] : null;
+                const card = createEnhancedConcernCard(concern, score, isDetected, threshold, detailedInfo);
                 resultsGrid.appendChild(card);
             });
 
             resultsSection.style.display = 'block';
         }
 
-        // Create concern card
-        function createConcernCard(concern, score, isDetected, threshold) {
+        // Create enhanced concern card with localization details
+        function createEnhancedConcernCard(concern, score, isDetected, threshold, detailedInfo) {
             const card = document.createElement('div');
             card.className = `concern-card ${isDetected ? 'detected' : 'not-detected'}`;
 
             const icons = {
                 'acne': '🔴',
-                'dark_circles': '👀',
+                'dark_circles': '👀', 
                 'redness': '🔥',
                 'wrinkles': '📏'
             };
@@ -478,6 +571,20 @@
                 .map(word => word.charAt(0).toUpperCase() + word.slice(1))
                 .join(' ');
 
+            let detailsHtml = '';
+            if (detailedInfo && detailedInfo.locations_count > 0) {
+                detailsHtml = `
+                    <div class="concern-details">
+                        <div class="severity">Severity: ${detailedInfo.severity}</div>
+                        <div class="locations">Locations: ${detailedInfo.locations_count}</div>
+                        ${concern === 'acne' ? '<div class="overlay-info">📍 Red circles on spots</div>' : ''}
+                        ${concern === 'dark_circles' ? '<div class="overlay-info">🟦 Blue heatmap under eyes</div>' : ''}
+                        ${concern === 'redness' ? '<div class="overlay-info">🟥 Red heatmap on face</div>' : ''}
+                        ${concern === 'wrinkles' ? '<div class="overlay-info">📏 Lines on affected areas</div>' : ''}
+                    </div>
+                `;
+            }
+
             card.innerHTML = `
                 <div class="concern-icon">${icons[concern] || '🔍'}</div>
                 <div class="concern-name">${concernName}</div>
@@ -485,9 +592,15 @@
                 <div class="concern-status">
                     ${isDetected ? '⚠️ Detected' : '✅ Not Detected'}
                 </div>
+                ${detailsHtml}
             `;
 
             return card;
+        }
+
+        // Create basic concern card (fallback)
+        function createConcernCard(concern, score, isDetected, threshold) {
+            return createEnhancedConcernCard(concern, score, isDetected, threshold, null);
         }
 
         // Show error message

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # app/flask_api.py
 """
 Flask API for Face Concern Detector
@@ -18,6 +19,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from inference import FaceConcernInference
 from src.config import Config
+from src.advanced_visualization import create_complete_analysis
+from models.resnet_model import SkinConcernDetector
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -30,14 +33,23 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Initialize predictor
+# Initialize predictor and model for advanced visualization
 config = Config()
 try:
     predictor = FaceConcernInference()
-    print("✓ Model loaded successfully")
+    
+    # Load model for advanced visualization
+    model = SkinConcernDetector(num_classes=config.NUM_CLASSES, pretrained=False)
+    checkpoint = torch.load(config.BEST_MODEL_PATH, map_location=config.DEVICE)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(config.DEVICE)
+    model.eval()
+    
+    print("Model and advanced visualization loaded successfully")
 except Exception as e:
-    print(f"✗ Error loading model: {e}")
+    print(f"Error loading model: {e}")
     predictor = None
+    model = None
 
 
 def allowed_file(filename):
@@ -82,18 +94,19 @@ def concerns():
 @app.route('/scan', methods=['POST'])
 def scan():
     """
-    Scan uploaded image for skin concerns
+    Enhanced scan with advanced overlays for each concern type
     
     Request:
         - file: Image file (multipart/form-data)
-        - return_visualization: Optional, boolean (default: false)
+        - return_visualization: Optional, boolean (default: true)
     
     Response:
         - scores: Dictionary of concern scores
         - detected_concerns: List of detected concerns
-        - visualization: Base64 encoded image (if requested)
+        - visualization: Base64 encoded image with overlays
+        - detailed_analysis: Precise localization data
     """
-    if predictor is None:
+    if predictor is None or model is None:
         return jsonify({'error': 'Model not loaded'}), 500
     
     # Check if file is in request
@@ -116,10 +129,10 @@ def scan():
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
         
-        # Get visualization flag
-        return_viz = request.form.get('return_visualization', 'false').lower() == 'true'
+        # Get visualization flag (default to true now)
+        return_viz = request.form.get('return_visualization', 'true').lower() == 'true'
         
-        # Predict
+        # Predict basic scores
         results = predictor.predict(filepath)
         
         # Format results for API response
@@ -133,11 +146,195 @@ def scan():
             'threshold': config.THRESHOLD
         }
         
-        # Add visualization if requested (simplified for now)
+        # Add advanced visualization with overlays
         if return_viz:
-            # For now, we'll just indicate visualization was requested
-            # You can enhance this later with GradCAM integration
-            response['visualization_requested'] = True
+            try:
+                # Run advanced analysis with precise localization
+                analysis_results = create_complete_analysis(model, filepath, config)
+                
+                # Convert detailed visualization to base64
+                buffer = io.BytesIO()
+                analysis_results['detailed_visualization'].save(buffer, format='PNG')
+                img_str = base64.b64encode(buffer.getvalue()).decode()
+                response['visualization'] = f"data:image/png;base64,{img_str}"
+                
+                # Add detailed analysis data
+                detailed_analysis = {}
+                for concern, data in analysis_results['localization_data'].items():
+                    locations_summary = []
+                    
+                    if concern == 'acne' and data['locations']:
+                        locations_summary = [
+                            {
+                                'type': 'acne_spot',
+                                'position': {'x': loc['x'], 'y': loc['y']},
+                                'severity': loc['severity'],
+                                'radius': loc['radius']
+                            } for loc in data['locations']
+                        ]
+                    elif concern == 'dark_circles' and data['locations']:
+                        locations_summary = [
+                            {
+                                'type': 'dark_circle_heatmap',
+                                'region': loc['name'],
+                                'severity': loc['severity'],
+                                'bbox': loc['bbox']
+                            } for loc in data['locations']
+                        ]
+                    elif concern == 'redness' and data['locations']:
+                        locations_summary = [
+                            {
+                                'type': 'redness_heatmap', 
+                                'region': loc['name'],
+                                'severity': loc['severity'],
+                                'bbox': loc['bbox']
+                            } for loc in data['locations']
+                        ]
+                    elif concern == 'wrinkles' and data['locations']:
+                        locations_summary = [
+                            {
+                                'type': 'wrinkle_line',
+                                'area': loc['area'],
+                                'start': loc['start'],
+                                'end': loc['end'],
+                                'severity': loc['severity'],
+                                'length': loc['length']
+                            } for loc in data['locations']
+                        ]
+                    
+                    detailed_analysis[concern] = {
+                        'confidence': f"{data['score']:.1%}",
+                        'severity': data['severity'],
+                        'locations_count': len(data['locations']),
+                        'locations': locations_summary
+                    }
+                
+                response['detailed_analysis'] = detailed_analysis
+                
+            except Exception as viz_error:
+                print(f"Visualization error: {viz_error}")
+                response['visualization_error'] = str(viz_error)
+        
+        # Clean up
+        os.remove(filepath)
+        
+        return jsonify(response), 200
+    
+    except Exception as e:
+        # Clean up on error
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/advanced-scan', methods=['POST'])
+def advanced_scan():
+    """
+    Advanced scan with precise localization and overlays
+    
+    Request:
+        - file: Image file (multipart/form-data)
+    
+    Response:
+        - analysis: Detailed analysis with locations
+        - visualization: Base64 encoded detailed image
+        - report: Base64 encoded analysis report
+    """
+    if predictor is None or model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
+    # Check if file is in request
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    if not allowed_file(file.filename):
+        return jsonify({
+            'error': f'Invalid file type. Allowed: {ALLOWED_EXTENSIONS}'
+        }), 400
+    
+    try:
+        # Save uploaded file
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(filepath)
+        
+        # Run advanced analysis
+        analysis_results = create_complete_analysis(model, filepath, config)
+        
+        # Convert images to base64
+        def image_to_base64(pil_image):
+            buffer = io.BytesIO()
+            pil_image.save(buffer, format='PNG')
+            img_str = base64.b64encode(buffer.getvalue()).decode()
+            return f"data:image/png;base64,{img_str}"
+        
+        # Format detailed response
+        detailed_analysis = {}
+        
+        for concern, data in analysis_results['localization_data'].items():
+            locations_summary = []
+            
+            if concern == 'acne':
+                locations_summary = [
+                    {
+                        'type': 'spot',
+                        'position': {'x': loc['x'], 'y': loc['y']},
+                        'severity': loc['severity'],
+                        'radius': loc['radius']
+                    } for loc in data['locations']
+                ]
+            elif concern == 'dark_circles':
+                locations_summary = [
+                    {
+                        'type': 'heatmap_area',
+                        'region': loc['name'],
+                        'severity': loc['severity'],
+                        'bbox': loc['bbox']
+                    } for loc in data['locations']
+                ]
+            elif concern == 'redness':
+                locations_summary = [
+                    {
+                        'type': 'redness_area', 
+                        'region': loc['name'],
+                        'severity': loc['severity'],
+                        'bbox': loc['bbox']
+                    } for loc in data['locations']
+                ]
+            elif concern == 'wrinkles':
+                locations_summary = [
+                    {
+                        'type': 'line',
+                        'area': loc['area'],
+                        'start': loc['start'],
+                        'end': loc['end'],
+                        'severity': loc['severity'],
+                        'length': loc['length']
+                    } for loc in data['locations']
+                ]
+            
+            detailed_analysis[concern] = {
+                'confidence': f"{data['score']:.1%}",
+                'severity': data['severity'],
+                'locations_count': len(data['locations']),
+                'locations': locations_summary
+            }
+        
+        response = {
+            'analysis': detailed_analysis,
+            'visualization': image_to_base64(analysis_results['detailed_visualization']),
+            'report': image_to_base64(analysis_results['analysis_panel']),
+            'summary': {
+                'total_concerns': len(detailed_analysis),
+                'detected_concerns': list(detailed_analysis.keys())
+            }
+        }
         
         # Clean up
         os.remove(filepath)
@@ -209,6 +406,6 @@ if __name__ == '__main__':
     # Run Flask app
     app.run(
         host='0.0.0.0',
-        port=5001,
+        port=5000,
         debug=True
     )
